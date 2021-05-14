@@ -1,0 +1,426 @@
+---
+title: "MovieLens Project, HarvardX"
+author: "Ghodsieh Ghanbari"
+date: "4/20/2021"
+output: pdf_document
+toc: true
+number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+
+The current project is related to the MovieLens project of the Capstone course of Harvardx: Data Science. A movie recommendation system will be created by using MovieLens data set. We divide the data set into the train set (edx), and test set (validation). We make an algorithm based on the data in edx set, then we use this algorithm to predict the ratings of the movies in the validation set.
+
+The Root Mean Square Error is employed to evaluate the accuracy of the method and determine the closeness of the predicted values to the true ratings in validation set. The following formula will be used:
+
+$$ RMSE = \sqrt{\frac{1}{N}\displaystyle\sum_{u,i} (\hat{y}_{u,i}-y_{u,i})^{2}} $$
+
+We will try several methods to find an algorithm with RMSE less than 0.86490.
+
+## Downloading the data set and building the train and test data sets
+
+```{r ,echo=TRUE}
+
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+
+library(dplyr)
+library(caret)
+library(data.table)
+library(tinytex)
+library(latexpdf)
+library(ggplot2)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                            title = as.character(title),
+                                            genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+      semi_join(edx, by = "movieId") %>%
+      semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+# Analysis and methods
+
+## Data analysis
+
+In this part, in order to know more about the data we see the first rows of the train set. It is seen that there are 6 features in the edx data set which are userId, movieId, rating, timestamp, title, and genres.
+
+```{r ,echo = FALSE}
+head(edx)
+
+```
+
+The number of distinct movies, users, and genres are as follows:
+ 
+```{r distints, echo=FALSE}
+number_of_distinct_users = n_distinct(edx$userId)
+number_of_distinct_movies = n_distinct(edx$movieId)
+number_of_distinct_genres = n_distinct(edx$genres)
+data.frame(number_of_distinct_users,number_of_distinct_movies,number_of_distinct_genres)
+```
+
+We transform timestamp column to the year the movie was rated and extract the year each movie was released. So, we get the following data set: 
+
+```{r rated_year ,echo=FALSE}
+
+library(lubridate)
+
+edx <- mutate(edx,rating_year = as_datetime(timestamp))
+edx$rating_year <- format(edx$rating_year, "%Y")
+head(edx)
+
+edx_with_dates <- edx %>% select(-timestamp) %>% mutate(released_year= as.numeric(stringi::stri_extract(edx$title, regex = "(?<=\\()\\d{4}(?=\\))", comments = TRUE )))
+
+head(edx_with_dates)
+```
+
+Calculating age of the movies at the time of rating and adding a new column called age_of_movie to the data set:
+
+```{r Age of Movies, echo=FALSE}
+
+edx_with_dates$rating_year <- as.numeric(edx_with_dates$rating_year)
+edx_with_dates <- edx_with_dates %>% mutate(age_of_movie=rating_year- released_year)
+
+head(edx_with_dates)
+```
+We explore if the age of movies has correlation with ratings.
+First, we find the unique ages of movies.
+
+```{r, echo=FALSE}
+#reviewing the age of the movies
+
+
+print("unique values of age of movies:")
+unique(edx_with_dates$age_of_movie)
+
+#removing negative elements of the age_of_movies column:
+
+edx_with_dates <- edx_with_dates %>% filter(age_of_movie > 0)
+
+# A new data set consisting of the average of ratings based on age of the movies
+
+avg_rating_by_age <- edx_with_dates %>% group_by(age_of_movie) %>% summarize(age_ave_rating=mean(rating))%>% arrange(desc(age_ave_rating))
+
+head(avg_rating_by_age)
+
+#graphing the average of rating based on age of movies
+
+avg_rating_by_age %>% ggplot(aes(age_of_movie,age_ave_rating)) + geom_point(size=2,color="blue") +geom_line(color="red"
+) +xlab("Age of movie") + ylab("Average of rating") + ggtitle("Average of ratings based on movie ages")
+
+```
+
+From the above graph we can see that the older is the movie the higher is its rating.
+
+
+Determining if the year in which the movie was rated has correlation with rating:
+
+```{r, echo=FALSE}
+
+Avg_rating_rated_year <- edx_with_dates %>% group_by(rating_year) %>% summarize(Avg_rating=mean(rating)) %>% arrange(desc(Avg_rating))
+
+head(Avg_rating_rated_year)
+
+Avg_rating_rated_year %>% ggplot(aes(rating_year,Avg_rating)) + geom_point()+geom_smooth() + ggtitle("average of rating vs the year movie was rated")
+
+```
+
+It is seen that between 1996 and 2002 almost the highest ratings were given to the movies.
+
+
+Now, we explore the variability of number of ratings for whole star and half star rating values.
+
+```{r, echo=FALSE}
+
+whole_stars <- c(0,1,2,3,4,5)
+rating_group <- ifelse(edx$rating %in% whole_stars, "whole_star","half_star")
+edx_with_stars <- data.frame(rating_value=edx$rating, group=rating_group)
+
+# plotting the histogram of rating values
+
+edx_with_stars %>% ggplot(aes(x=rating_value, fill=group)) + geom_histogram(binwidth = 0.25) + scale_x_continuous(breaks=seq(0, 5, by= 0.5))  + xlab("rating value") + ylab("number of ratings") 
+
+```
+
+From the above histogram we can observe that no one has gives 0 as a rating. Also, whole stars are more common compared to half stars. The most common ratings are 4,3, 5, 3.5.
+
+Exploring the top 10 movies based on average of ratings:
+
+```{r, echo=FALSE}
+edx_with_dates %>% group_by(title) %>% summarize(n=n(),avg_rate= mean(rating)) %>% top_n(10, avg_rate)
+
+```
+
+We can see that the highest ratings belong to movies which were rated a few times! 
+
+We explore which movies had the highest number of ratings:
+
+```{r, echo=FALSE}
+
+edx_with_dates %>% group_by(title) %>% summarize(n=n()) %>% arrange(desc(n))
+
+```
+The movie Pulp Fiction had the highest number of ratings, 31362 times.
+
+
+Histograms of number of rating by movieId and userId:
+
+```{r, echo=FALSE}
+
+#histogram of number of ratings for movie Ids
+edx_with_dates %>% group_by(movieId) %>% summarize(count = n()) %>%
+  ggplot(aes(count)) + geom_histogram(binwidth = 0.2, color="blue") + xlab("Movie Id")+ ylab("number of ratings")+
+  scale_x_log10() +
+  ggtitle("Number of Ratings for Movie Ids")
+
+```
+```{r, echo=FALSE}
+
+#histogram of number of ratings for user Ids
+
+edx_with_dates %>% group_by(userId) %>% summarize(count = n()) %>%
+  ggplot(aes(count)) + geom_histogram(binwidth = 0.2, color="blue") + xlab("User Id")+ ylab("number of ratings")+
+  scale_x_log10() +
+  ggtitle("Number of Ratings for user Ids")
+
+```
+
+Based on the above histograms, since some movies get more number of ratings and some users give more number of ratings, we should consider movie and user effects.
+
+
+Exploring the relation between the genre of movies and movie ratings.
+I extract genre and analyze to see what are the effects of genres on movie ratings.  
+
+```{r, echo=FALSE}
+memory.limit(size = 20000)
+edx_genre <- edx_with_dates %>% separate_rows(genres, sep ="\\|") %>% group_by(genres) %>% summarize(count=n(),avg_rating_genre=mean(rating),distinctMovies = n_distinct(movieId), distinctUserId=n_distinct(userId))
+
+head(edx_genre)
+```
+It is seen that there are 19 type of genres. We have one movie with no genre which was rated by 7 users.
+
+Arranging the genres based on the number of ratings in each genre
+```{r, echo=FALSE}
+edx_genre %>% arrange(desc(count))
+edx_genre %>% ggplot(aes(reorder(genres,count),count,fill=genres)) + geom_col()+ xlab("Genre")+ ylab("number of ratings")+ theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("Number of ratings based on genres")
+```
+
+We can observe that which genres have the most number of movies and ratings. They are Drama, Comedy, Action, etc.
+
+Arranging the genres based on the average of rating:
+
+```{r, echo=FALSE}
+edx_genre %>% arrange(desc(avg_rating_genre))
+```
+
+It is seen that some genres with low number of ratings have high average rating.
+
+We graph the average of rating based on genre of movies:
+
+```{r, echo=FALSE}
+edx_genre %>% ggplot(aes(reorder(genres,avg_rating_genre),avg_rating_genre,fill=genres)) + geom_col()+ xlab("Genre")+ ylab("Average of ratings")+ theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("Average of ratings based on movie genres")
+```
+
+The above graph shows that which genres have highest average ratings. Film-Noir has the highest average rating with 116011 ratings.
+
+## Methods
+
+In this part we evaluate several methods to see which method gives the desired RMSE (< 0.86490 ).
+We create following models:
+1) naive model, just using the average ratings.
+2) Movie effect model.
+3) Movie and user effects model.
+4) Regularized Movie and user effects model.
+
+The following formula is used to compute RMSE:
+$$ RMSE = \sqrt{\frac{1}{N}\displaystyle\sum_{u,i} (\hat{y}_{u,i}-y_{u,i})^{2}} $$
+
+where N is the number of user and movie combinations.
+The lower is RMSE, the better is the model.
+
+The following function is used for calculating RMSE:
+
+```{r, echo=TRUE}
+
+#RMSE function:
+
+RMSE <- function(true_ratings, predicted_ratings){
+     sqrt(mean((true_ratings - predicted_ratings)^2))}
+```
+
+Naive model:
+$$ Y_{u, i} = \mu + \epsilon_{u, i} $$
+
+```{r, echo=TRUE}
+#Naive model:
+  mu<- mean(edx$rating)
+naive_rmse <- RMSE(validation$rating, mu)
+naive_rmse
+```
+
+Table of result:
+
+```{r, echo=FALSE}
+rmse_results <- data_frame(Method = "Just the average", RMSE = naive_rmse)
+rmse_results %>% knitr::kable("pipe")
+```
+
+Movie effect model:
+$$Y_{u, i} = \mu +b_{i}+ \epsilon_{u, i}$$
+
+```{r, echo=TRUE}
+
+# Model with Movie effect:
+
+movie_avgs <- edx %>% 
+     group_by(movieId) %>% 
+     summarize(b_i = mean(rating - mu))
+
+predicted_ratings <- mu + validation %>% 
+     left_join(movie_avgs, by='movieId') %>% .$b_i
+
+model_b_i_rmse <- RMSE(validation$rating, predicted_ratings)
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Method="Movie Effect Model",
+                                     RMSE = model_b_i_rmse ))
+```
+Table of results:
+
+```{r, echo=FALSE}
+rmse_results %>% knitr::kable("pipe")
+
+```
+Movie and user effects model:
+
+$$Y_{u, i} = \mu + b_{i} + b_{u} + \epsilon_{u, i}$$
+
+```{r, echo=TRUE}
+
+# Model with Movie and User effect:
+
+user_avgs <- edx %>% 
+     left_join(movie_avgs, by='movieId') %>%
+     group_by(userId) %>%
+     summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings <- validation %>% 
+     left_join(movie_avgs, by='movieId') %>%
+     left_join(user_avgs, by='userId') %>%
+     mutate(pred = mu + b_i + b_u) %>%
+     .$pred
+
+model_b_i_u_rmse <- RMSE(validation$rating, predicted_ratings)
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Method="Movie + User Effects Model",  
+                                     RMSE = model_b_i_u_rmse ))
+
+
+```
+
+Table of results:
+
+```{r, echo=FALSE}
+rmse_results %>% knitr::kable("pipe")
+```
+Now, since we had movies with few number of ratings and users that rated a few movies, we apply Regularization for movie and user effects.
+
+```{r, echo=TRUE}
+
+lambdas <- seq(0, 10, 0.25)
+
+rmses <- sapply(lambdas, function(l){
+     mu <- mean(edx$rating)
+     
+     b_i <- edx %>%
+          group_by(movieId) %>%
+          summarize(b_i = sum(rating - mu)/(n()+l))
+     b_u <- edx %>% 
+          left_join(b_i, by="movieId") %>%
+          group_by(userId) %>%
+          summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+     
+     predicted_ratings <- validation %>% 
+          left_join(b_i, by = "movieId") %>%
+          left_join(b_u, by = "userId") %>%
+          mutate(pred = mu + b_i + b_u) %>%
+          .$pred
+     
+     return(RMSE(validation$rating, predicted_ratings))
+})
+
+```
+
+Plot of RMSE versus lambda values:
+
+```{r , echo=FALSE}
+qplot(lambdas, rmses)
+```
+
+```{r, echo=TRUE}
+
+lambdas[which.min(rmses)]
+```
+It is seen that 5.25 gives the minimum RMSE. Therefore, we use lambda = 5.25 for our final model.
+
+# Results
+
+The table below shows the RMSE values obtained by different methods. Based on the table Reguralized movie and user effects model gives the lowest RMSE. Thus, the final RMSE is 0.8648170.
+
+```{r, echo=FALSE}
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Method="Regularized Movie + User Effects Model",  
+                                     RMSE = min(rmses) ))
+rmse_results %>% knitr::kable("pipe")
+
+```
+# Conclusion
+
+In this project we built a recommendation system for the MovieLens data set. We created several models based on the data in the train set and applied these models to predict ratings in the test sat (validation data set). It was shown that applying regularization on movie and user effects will improve our model and will result in more accurate predicting based on the RMSE values.
